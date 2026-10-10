@@ -66,10 +66,25 @@ jobs:
           -p:EmbedAssembliesIntoApk=true
           -p:AndroidPackageFormats=apk
 
-      - name: Upload test APK
-        uses: actions/upload-artifact@v4
+      - name: Select signed APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk="$(find src/TiktokStreakSaver/bin/Debug/net9.0-android -type f -name '*-Signed.apk' -print -quit)"
+          if [[ -z "$apk" ]]; then
+            echo "::error::No signed APK found. Available APK files:"
+            find src/TiktokStreakSaver/bin/Debug/net9.0-android -type f -name '*.apk' -print
+            exit 1
+          fi
+          mkdir -p output
+          cp "$apk" output/StreakSaver-Debug-Signed.apk
+          echo "Selected signed APK: $apk"
+          ls -lh output/StreakSaver-Debug-Signed.apk
+
+      - name: Upload signed APK without ZIP
+        uses: actions/upload-artifact@v7
         with:
-          name: streak-saver-debug-apk
-          path: src/TiktokStreakSaver/bin/Debug/net9.0-android/**/*.apk
+          path: output/StreakSaver-Debug-Signed.apk
+          archive: false
           if-no-files-found: error
           retention-days: 14
