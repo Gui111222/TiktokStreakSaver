@@ -12,6 +12,7 @@
     var scrollAttempts = 0;
     var checkedUsernames = {};
     var newItemsFound = 0;
+    var resultReported = false;
 
     var log = function (msg) {
         if (typeof StreakApp == 'undefined') {
@@ -142,33 +143,24 @@
     // ── Chat Item Discovery ──────────────────────────────────────────────────
 
     var findChatItems = function () {
-        // Primary: current TikTok DM selector
-        var items = document.querySelectorAll("[data-e2e*='dm-new-conversation-item']");
-        if (items.length > 0) {
-            log('[FIND] Found ' + items.length + ' items via: dm-new-conversation-item');
-            return items;
-        }
-
-        // Fallback selectors — TikTok periodically renames data-e2e values
-        var fallbacks = [
-            "[data-e2e*='chat-list-item']",
-            "[data-e2e*='chat-item']"
+        // Known selectors in priority order. Recipient is verified after opening a chat.
+        var selectors = [
+            '[data-e2e^="dm-new-conversation-item"]',
+            '[data-e2e*="chat-list-item"]',
+            '[data-e2e*="chat-item"]'
         ];
-        for (var i = 0; i < fallbacks.length; i++) {
-            try {
-                items = document.querySelectorAll(fallbacks[i]);
-                if (items.length > 0) {
-                    log('[FIND] Found ' + items.length + ' items via fallback: ' + fallbacks[i]);
-                    return items;
-                }
-            } catch (e) { }
+        for (var i = 0; i < selectors.length; i++) {
+            var items = document.querySelectorAll(selectors[i]);
+            if (items.length) {
+                log('[FIND] ' + items.length + ' chats via ' + selectors[i]);
+                return items;
+            }
         }
-
-        log('[FIND] WARNING: No chat items found with any selector');
+        log('[FIND] No known chat list selector matched');
         return [];
     };
 
-    var findChatListContainer = function () {
+        var findChatListContainer = function () {
         if (chatItems.length > 0) {
             var parent = chatItems[0].parentElement;
             while (parent && parent !== document.body) {
@@ -250,38 +242,8 @@
             log('[HEADER] No ChatHeader element found on page');
         }
 
-        // Fallback: any profile link in the chat panel area
-        var links = document.querySelectorAll('[class*="StyledLink"]');
-        for (var i = 0; i < links.length; i++) {
-            var link = links[i];
-            var parent = link.closest('[data-e2e]');
-            var parentAttr = parent ? parent.getAttribute('data-e2e') : '';
-
-            if (!parentAttr || parentAttr === 'chat-header') {
-                var href = link.getAttribute('href') || '';
-                var match = href.match(/\/@([^\/]+)/);
-                if (match && match[1]) {
-                    return match[1];
-                }
-            }
-        }
-
-        // Last resort: any a[href*="/@"] in the chat panel (right side), not in nav or chat list
-        var allProfileLinks = document.querySelectorAll('a[href*="/@"]');
-        for (var j = 0; j < allProfileLinks.length; j++) {
-            var pLink = allProfileLinks[j];
-            // Skip links inside the chat list sidebar
-            if (pLink.closest('[data-e2e*="conversation-item"]') || pLink.closest('[data-e2e*="chat-list"]') || pLink.closest('[data-e2e*="dm-new-conversation"]')) continue;
-            // Skip links in the nav bar (these are the logged-in user's own profile)
-            if (pLink.closest('[data-e2e*="nav-"]') || pLink.closest('[data-e2e="profile-icon"]') || pLink.closest('nav')) continue;
-            var href = pLink.getAttribute('href') || '';
-            var match = href.match(/\/@([^\/]+)/);
-            if (match && match[1]) {
-                log('[HEADER] Found username via last-resort profile link: ' + match[1]);
-                return match[1];
-            }
-        }
-
+        // Never guess the recipient from arbitrary profile links elsewhere on the page.
+        log('[HEADER] Could not verify recipient from the active chat header');
         return '';
     };
 
@@ -333,15 +295,28 @@
     // ── Message Input & Sending ──────────────────────────────────────────────
 
     var findMessageInput = function () {
-        var editor = document.querySelector('[class*="DraftEditor-editorContainer"] [contenteditable="true"]') ||
-            document.querySelector('[class*="DraftEditor-root"] [contenteditable="true"]') ||
-            document.querySelector('div[contenteditable="true"][role="textbox"]') ||
-            document.querySelector('div[contenteditable="true"]');
-
-        return editor;
+        var selectors = [
+            '[class*="DraftEditor-editorContainer"] [contenteditable="true"]',
+            '[class*="DraftEditor-root"] [contenteditable="true"]',
+            '[data-e2e*="message-input"] [contenteditable="true"]',
+            '[role="textbox"][contenteditable="true"]',
+            'div[contenteditable="true"]'
+        ];
+        for (var i = 0; i < selectors.length; i++) {
+            var candidates = document.querySelectorAll(selectors[i]);
+            for (var j = 0; j < candidates.length; j++) {
+                var el = candidates[j];
+                if (el.getClientRects().length === 0 || el.getAttribute('aria-disabled') === 'true') continue;
+                if (el.closest('nav, [role="navigation"], [data-e2e*="conversation-item"], [data-e2e*="chat-list"]')) continue;
+                log('[EDITOR] Using selector ' + selectors[i]);
+                return el;
+            }
+        }
+        log('[EDITOR] No visible chat input matched known selectors');
+        return null;
     };
 
-    var findDraftEditor = function (messageInput) {
+        var findDraftEditor = function (messageInput) {
         var key = Object.keys(messageInput).find(function (k) {
             return k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$');
         });
@@ -451,58 +426,75 @@
         return count;
     };
 
+    // Only inspect active notifications, never old chat history containing similar text.
+    var detectRateLimitNotice = function () {
+        var nodes = document.querySelectorAll('[role="alert"], [aria-live="assertive"], [data-e2e*="toast"], [class*="Toast"], [class*="toast"], [role="dialog"]');
+        var pattern = /too many (messages|requests)|send(ing)? (messages )?too (fast|frequently)|try again later|rate limit|message limit|temporarily (blocked|restricted)|muitas (mensagens|tentativas)|tente novamente mais tarde|limite de mensagens/i;
+        for (var i = 0; i < nodes.length; i++) {
+            if (nodes[i].getClientRects().length && pattern.test((nodes[i].innerText || nodes[i].textContent || '').slice(0, 500))) {
+                log('[LIMIT] Sending restriction notice detected');
+                return true;
+            }
+        }
+        return false;
+    };
+
     var findSendButton = function (messageInput) {
-        var selector = '[data-e2e*="send"], button[type="submit"], button[aria-label*="send" i], [role="button"][aria-label*="send" i]';
-        var container = messageInput.parentElement;
-        for (var depth = 0; container && depth < 7; depth++, container = container.parentElement) {
-            var buttons = container.querySelectorAll(selector);
-            for (var i = 0; i < buttons.length; i++) {
-                var button = buttons[i];
-                if (button === messageInput || button.closest('[contenteditable]')) continue;
-                if (button.disabled || button.getAttribute('aria-disabled') === 'true') continue;
-                if (button.getClientRects().length === 0) continue;
-                return button;
+        var selectors = [
+            '[data-e2e="send-button"]',
+            '[data-e2e="message-send"]',
+            '[data-e2e="chat-send-button"]',
+            'button[type="submit"]',
+            'button[aria-label*="send" i]'
+        ];
+        for (var scope = messageInput.parentElement, depth = 0; scope && depth < 6; scope = scope.parentElement, depth++) {
+            for (var i = 0; i < selectors.length; i++) {
+                var candidates = scope.querySelectorAll(selectors[i]);
+                for (var j = 0; j < candidates.length; j++) {
+                    var btn = candidates[j];
+                    if (btn.getClientRects().length === 0 || btn.disabled ||
+                        btn.getAttribute('aria-disabled') === 'true' || btn.closest('[contenteditable]')) continue;
+                    log('[SEND] Using selector ' + selectors[i]);
+                    return btn;
+                }
             }
         }
         return null;
     };
 
     var sendMessage = function (messageInput) {
-        var sendBtn = findSendButton(messageInput);
-        if (sendBtn) {
-            log('[SEND] Clicking visible send control: ' + (sendBtn.getAttribute('data-e2e') || sendBtn.tagName));
-            sendBtn.click();
-            return;
+        var btn = findSendButton(messageInput);
+        if (!btn) {
+            reportError('Send button not found; TikTok layout may have changed');
+            return false;
         }
-
-        log('[SEND] No usable send control found; trying Enter');
-        messageInput.focus();
-        messageInput.dispatchEvent(new KeyboardEvent('keydown', {
-            key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true
-        }));
-        messageInput.dispatchEvent(new KeyboardEvent('keyup', {
-            key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true
-        }));
+        btn.click();
+        return true;
     };
 
-    var reportSuccess = function () {
-        log('[RESULT] CONFIRMED IN CHAT — New message appeared for ' + userName);
-        if (typeof StreakApp !== 'undefined') {
-            StreakApp.onMessageSent(userName, true, '');
-        }
+        var reportSuccess = function () {
+        if (resultReported) return;
+        resultReported = true;
+        log('[RESULT] UI confirmed; server delivery not guaranteed');
+        if (typeof StreakApp !== 'undefined') StreakApp.onMessageSent(userName, true, '', '[AttemptId]');
     };
 
     var reportError = function (errorMessage) {
+        if (resultReported) return;
+        resultReported = true;
         log('[RESULT] FAIL — ' + errorMessage);
-        if (typeof StreakApp !== 'undefined') {
-            StreakApp.onMessageSent(userName, false, errorMessage);
-        }
+        if (typeof StreakApp !== 'undefined') StreakApp.onMessageSent(userName, false, errorMessage, '[AttemptId]');
     };
 
     var verifySend = function (messageInput, baseline) {
         var checks = 0;
         var maxChecks = 20;
         var check = function () {
+            if (resultReported) return;
+            if (detectRateLimitNotice()) {
+                reportError('TikTok rate limit detected; automation paused');
+                return;
+            }
             checks++;
             var emptied = normalizeMessageText(messageInput.textContent) === '';
             var shownInChat = countRenderedMessageMatches() > baseline;
@@ -531,8 +523,17 @@
             return;
         }
 
+        if (detectRateLimitNotice()) {
+            reportError('TikTok rate limit detected; automation paused');
+            return;
+        }
         log('[CHAT] Found message input, typing...');
         typeMessage(messageInput, function () {
+            if (resultReported) return;
+            if (detectRateLimitNotice()) {
+                reportError('TikTok rate limit detected; automation paused');
+                return;
+            }
             var expected = normalizeMessageText(message);
             var actual = normalizeMessageText(messageInput.textContent);
             if (!expected || actual !== expected) {
@@ -543,8 +544,7 @@
 
             var baseline = countRenderedMessageMatches();
             try {
-                sendMessage(messageInput);
-                verifySend(messageInput, baseline);
+                if (sendMessage(messageInput)) verifySend(messageInput, baseline);
             } catch (e) {
                 reportError('Send control failed: ' + e.message);
             }
