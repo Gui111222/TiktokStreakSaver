@@ -1,3 +1,4 @@
+# Test APK workflow: triggers on push to main or manual dispatch.
 name: CI
 
 on:
