@@ -34,6 +34,7 @@ public class StreakService : Service
     private string _baseScript = string.Empty;
     private readonly List<string> _disabledUsernames = new();
     private const string UserNotFoundError = "User not found in chat list";
+    private const string UnconfirmedSendError = "Send not confirmed";
 
     // ── Randomized Normal Messages state ──
     private List<string>? _shuffledNormalMessages;
@@ -553,7 +554,10 @@ public class StreakService : Service
         if (!success)
         {
             _failureAttemptsForCurrentFriend++;
-            if (_allowSendRetries && _failureAttemptsForCurrentFriend < MaxSendAttemptsPerFriend)
+            // A send may have reached TikTok even if the UI did not confirm it.
+            // Retrying an ambiguous send automatically risks duplicate messages.
+            bool uncertainDelivery = error.StartsWith(UnconfirmedSendError, StringComparison.OrdinalIgnoreCase);
+            if (!uncertainDelivery && _allowSendRetries && _failureAttemptsForCurrentFriend < MaxSendAttemptsPerFriend)
             {
                 AppLog("RETRY", label,
                     $"Attempt {_failureAttemptsForCurrentFriend}/{MaxSendAttemptsPerFriend}: {error}");
@@ -756,7 +760,18 @@ public class StreakService : Service
                     && (_runResult?.FriendResults.Count == 0
                         || _runResult.FriendResults.All(r => r.Success));
 
-                if (allSucceeded)
+                bool hasUnconfirmedSend = _runResult?.FriendResults.Any(r =>
+                    !r.Success && (r.ErrorMessage?.StartsWith(UnconfirmedSendError, StringComparison.OrdinalIgnoreCase) ?? false)) == true;
+
+                if (hasUnconfirmedSend)
+                {
+                    // Do not queue automatic hourly retries for ambiguous deliveries.
+                    // The recipient should be checked manually before trying again.
+                    _settingsService.SetLastRunFailed(false, null);
+                    StreakScheduler.ScheduleNextRun(this);
+                    AppLog("SYSTEM", "-", "Unconfirmed send — automatic hourly retry skipped to avoid duplicates");
+                }
+                else if (allSucceeded)
                 {
                     _settingsService.ResetTodayRetryCount();
                     _settingsService.SetLastRunFailed(false, null);
