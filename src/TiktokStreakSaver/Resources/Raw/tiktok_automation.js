@@ -614,7 +614,14 @@
                         log('[CHAT] MATCH — Found @' + match[1] + ' in item ' + (chatIndex + 1) + ' (pre-click)');
                         chatItem.click();
                         found = true;
-                        setTimeout(sendMessageViaButton, 1500);
+                        setTimeout(function () {
+                            var actualChat = findCurrentChatUsername();
+                            if (!isTargetUser(actualChat)) {
+                                reportError('Chat did not open for the selected user');
+                                return;
+                            }
+                            sendMessageViaButton();
+                        }, 1500);
                         return;
                     }
                     break;
