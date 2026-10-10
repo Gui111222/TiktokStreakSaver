@@ -29,12 +29,14 @@ public class StreakService : Service
     private SettingsService? _settingsService;
     private List<FriendConfig>? _friendsToProcess;
     private int _currentFriendIndex;
+    private string? _activeAttemptId;
     private StreakRunResult? _runResult;
     private PowerManager.WakeLock? _wakeLock;
     private string _baseScript = string.Empty;
     private readonly List<string> _disabledUsernames = new();
     private const string UserNotFoundError = "User not found in chat list";
     private const string UnconfirmedSendError = "Send not confirmed";
+    private const string RateLimitError = "TikTok rate limit detected";
 
     // ── Randomized Normal Messages state ──
     private List<string>? _shuffledNormalMessages;
@@ -59,7 +61,8 @@ public class StreakService : Service
     private int _cooldownSkippedCount = 0;
 
     private int _failureAttemptsForCurrentFriend;
-    private const int MaxSendAttemptsPerFriend = 4;
+    // Do not retry a send while delivery or account restrictions are uncertain.
+    private const int MaxSendAttemptsPerFriend = 1;
     private bool _allowSendRetries = true;
 
     private static List<string> _logs = new();
@@ -275,6 +278,7 @@ public class StreakService : Service
             _automationStarted = false;
 
             _currentFriendIndex = 0;
+            _activeAttemptId = null;
             _runResult = new StreakRunResult();
             _cooldownSkippedCount = 0;
             _logs.Clear();
@@ -489,9 +493,19 @@ public class StreakService : Service
             return;
         }
 
-        _allowSendRetries = true;
-        var js = GetFriendMessageScript(target, message, friend.IsGroup);
+        _allowSendRetries = false;
+        var attemptId = Guid.NewGuid().ToString("N");
+        _activeAttemptId = attemptId;
+        var js = GetFriendMessageScript(target, message, friend.IsGroup)
+            .Replace("[AttemptId]", attemptId);
         _webView?.EvaluateJavascript(js, null);
+
+        // A WebView injection can silently stall. Avoid an infinite foreground run.
+        _mainHandler?.PostDelayed(() =>
+        {
+            if (_activeAttemptId != attemptId || _isCancelRequested) return;
+            OnMessageResult(target, false, "Send not confirmed; operation timed out", attemptId);
+        }, 60000);
     }
 
     private void ShuffleList<T>(List<T> list)
@@ -517,64 +531,29 @@ public class StreakService : Service
         return automationScript;
     }
 
-    internal void OnMessageResult(string username, bool success, string error)
+    internal void OnMessageResult(string username, bool success, string error, string attemptId)
     {
-        if (_isCancelRequested) return;
-        if (_friendsToProcess == null || _settingsService == null) return;
+        if (_isCancelRequested || _friendsToProcess == null || _settingsService == null) return;
+        if (string.IsNullOrEmpty(attemptId) || attemptId != _activeAttemptId) {
+            AppLog("WARN", "-", "Ignored stale or duplicate JavaScript send result");
+            return;
+        }
+        if (_currentFriendIndex >= _friendsToProcess.Count) return;
 
-        // The JS callback reports the target it was given: a username for DMs, or the
-        // display name for groups (groups have no @handle on TikTok).
-        var friend = _friendsToProcess.FirstOrDefault(f =>
-            (f.IsGroup && f.DisplayName.Equals(username, StringComparison.OrdinalIgnoreCase)) ||
-            (!f.IsGroup && f.Username.Equals(username, StringComparison.OrdinalIgnoreCase)));
-
-        if (friend == null)
-        {
-            // Target reported by JS doesn't match any friend/group in the list. This can happen
-            // when TikTok returns a different casing/format. Retry the current friend
-            // a few times rather than silently advancing past it.
-            AppLog("WARN", $"@{username}",
-                "Target from JS callback did not match any entry in the list. Retrying current friend...");
-            _failureAttemptsForCurrentFriend++;
-            if (_failureAttemptsForCurrentFriend < MaxSendAttemptsPerFriend)
-            {
-                _mainHandler?.PostDelayed(SendCurrentFriendMessage, 3000);
-            }
-            else
-            {
-                AppLog("FAIL", $"@{username}", "Max retries exceeded for unmatched username");
-                _failureAttemptsForCurrentFriend = 0;
-                _currentFriendIndex++;
-                _mainHandler?.PostDelayed(ProcessNextFriend, 3000);
-            }
+        var friend = _friendsToProcess[_currentFriendIndex];
+        var target = friend.IsGroup ? friend.DisplayName : friend.Username;
+        if (!target.Equals(username, StringComparison.OrdinalIgnoreCase)) {
+            AppLog("WARN", "-", "Ignored result for a different recipient");
             return;
         }
 
+        _activeAttemptId = null; // Each attempt can be completed only once.
         var label = friend.IsGroup ? $"Group: {friend.DisplayName}" : $"@{username}";
         if (!success)
         {
-            _failureAttemptsForCurrentFriend++;
-            // A send may have reached TikTok even if the UI did not confirm it.
-            // Retrying an ambiguous send automatically risks duplicate messages.
-            bool uncertainDelivery = error.StartsWith(UnconfirmedSendError, StringComparison.OrdinalIgnoreCase);
-            if (!uncertainDelivery && _allowSendRetries && _failureAttemptsForCurrentFriend < MaxSendAttemptsPerFriend)
-            {
-                AppLog("RETRY", label,
-                    $"Attempt {_failureAttemptsForCurrentFriend}/{MaxSendAttemptsPerFriend}: {error}");
-                _mainHandler?.PostDelayed(SendCurrentFriendMessage, 3000);
-                return;
-            }
-
+            error ??= "Unspecified send failure";
             friend.FailureCount++;
             AppLog("FAIL", label, error);
-
-            bool skipUnreachable = _settingsService.GetSkipUnreachableUsers();
-            if (skipUnreachable && error == UserNotFoundError)
-            {
-                friend.IsEnabled = false;
-                _disabledUsernames.Add(label);
-                AppLog("DISABLED", label, "Auto-disabled — not found in chat list");
-            }
             _settingsService.UpdateFriend(friend);
 
             _runResult?.FriendResults.Add(new FriendMessageResult
@@ -586,16 +565,24 @@ public class StreakService : Service
             });
 
             _failureAttemptsForCurrentFriend = 0;
-            _currentFriendIndex++;
-            UpdateNotification($"{_currentFriendIndex}/{_friendsToProcess.Count} : Failed: {label}", _currentFriendIndex, _friendsToProcess.Count);
-            _mainHandler?.PostDelayed(ProcessNextFriend, 3000);
+            if (error.StartsWith(RateLimitError, StringComparison.OrdinalIgnoreCase))
+            {
+                // An explicit TikTok restriction requires a deliberate manual restart.
+                StreakScheduler.CancelSchedule(this);
+                AppLog("LIMIT", "-", "Automatic sending disabled after TikTok restriction notice");
+                CompleteService(false, "TikTok sending restriction detected. Automatic sending paused.");
+            }
+            else
+            {
+                // Do not advance to the next user: the same failure may affect every chat.
+                CompleteService(false, $"Stopped after send failure: {error}");
+            }
             return;
         }
 
         friend.SuccessCount++;
         friend.LastMessageSent = DateTime.Now;
-        AppLog("SUCCESS", label, "Message sent");
-
+        AppLog("SUCCESS", label, "Message visible in chat UI (delivery not guaranteed)");
         _settingsService.UpdateFriend(friend);
 
         _runResult?.FriendResults.Add(new FriendMessageResult
@@ -763,13 +750,12 @@ public class StreakService : Service
                 bool hasUnconfirmedSend = _runResult?.FriendResults.Any(r =>
                     !r.Success && (r.ErrorMessage?.StartsWith(UnconfirmedSendError, StringComparison.OrdinalIgnoreCase) ?? false)) == true;
 
-                if (hasUnconfirmedSend)
+                if (hasUnconfirmedSend || _runResult?.FriendResults.Any(r => !r.Success) == true)
                 {
-                    // Do not queue automatic hourly retries for ambiguous deliveries.
-                    // The recipient should be checked manually before trying again.
+                    // Never hourly-retry an attempted send that failed or was not confirmed.
                     _settingsService.SetLastRunFailed(false, null);
                     StreakScheduler.ScheduleNextRun(this);
-                    AppLog("SYSTEM", "-", "Unconfirmed send — automatic hourly retry skipped to avoid duplicates");
+                    AppLog("SYSTEM", "-", "Send failed/uncertain — no automatic hourly retry");
                 }
                 else if (allSucceeded)
                 {
@@ -854,9 +840,9 @@ public class StreakService : Service
 
         [JavascriptInterface]
         [Export("onMessageSent")]
-        public void OnMessageSent(string username, bool success, string error)
+        public void OnMessageSent(string username, bool success, string error, string attemptId)
         {
-            _service._mainHandler?.Post(() => _service.OnMessageResult(username, success, error));
+            _service._mainHandler?.Post(() => _service.OnMessageResult(username, success, error, attemptId));
         }
 
         [JavascriptInterface]
