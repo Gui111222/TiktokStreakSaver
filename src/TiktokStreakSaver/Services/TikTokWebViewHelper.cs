@@ -17,21 +17,21 @@ public static class TikTokWebViewHelper
         public bool IsValidUrl { get; set; }
     }
 
-    /// <summary>Stop loading and release the login WebView so TikTok video/audio does not continue in the background.</summary>
+    /// <summary>Stop playback when leaving login, without disconnecting MAUI's WebView handler prematurely.</summary>
     public static void TearDownLoginWebView(WebView webView)
     {
 #if ANDROID
         MainThread.BeginInvokeOnMainThread(() =>
         {
+            // DisconnectHandler() can null out VirtualView while Android is still
+            // delivering WebViewClient.OnPageFinished, causing a fatal exception.
+            // Let MAUI own the handler's lifetime when the page is removed.
             if (webView.Handler?.PlatformView is Android.Webkit.WebView awv)
             {
                 awv.StopLoading();
                 awv.OnPause();
-                awv.PauseTimers();
-                awv.LoadUrl("about:blank");
+                FlushCookies();
             }
-            webView.Source = null;
-            webView.Handler?.DisconnectHandler();
         });
 #elif IOS
         Platforms.iOS.Services.IosWebViewConfigurator.TearDownLoginWebView(webView);
