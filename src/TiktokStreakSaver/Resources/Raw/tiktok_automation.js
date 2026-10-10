@@ -425,40 +425,68 @@
         }
     };
 
-    var sendMessage = function (messageInput) {
-        var sendBtn = document.querySelector('[data-e2e*="send"]') ||
-            document.querySelector('[data-e2e*="Send"]') ||
-            document.querySelector('button[type="submit"]');
+    var normalizeMessageText = function (value) {
+        return String(value || '').replace(/[\u200B-\u200D\uFEFF]/g, '').replace(/\s+/g, ' ').trim();
+    };
 
+    var countRenderedMessageMatches = function () {
+        var wanted = normalizeMessageText(message);
+        if (!wanted) return 0;
+        var nodes = document.querySelectorAll('p, span, [data-e2e*="message-text"], [data-e2e*="msg-text"], [class*="MessageText"], [class*="message-text"], [class*="Bubble"], [class*="bubble"]');
+        var count = 0;
+        for (var i = 0; i < nodes.length; i++) {
+            var el = nodes[i];
+            if (el.closest('[contenteditable], [data-e2e*="conversation-item"], [data-e2e*="chat-list"], nav, [role="navigation"]')) continue;
+            if (normalizeMessageText(el.textContent) !== wanted) continue;
+            var descendants = el.querySelectorAll('span, p, [data-e2e*="message-text"], [class*="Bubble"], [class*="bubble"]');
+            var innerSame = false;
+            for (var j = 0; j < descendants.length; j++) {
+                if (normalizeMessageText(descendants[j].textContent) === wanted) {
+                    innerSame = true;
+                    break;
+                }
+            }
+            if (!innerSame) count++;
+        }
+        return count;
+    };
+
+    var findSendButton = function (messageInput) {
+        var selector = '[data-e2e*="send"], button[type="submit"], button[aria-label*="send" i], [role="button"][aria-label*="send" i]';
+        var container = messageInput.parentElement;
+        for (var depth = 0; container && depth < 7; depth++, container = container.parentElement) {
+            var buttons = container.querySelectorAll(selector);
+            for (var i = 0; i < buttons.length; i++) {
+                var button = buttons[i];
+                if (button === messageInput || button.closest('[contenteditable]')) continue;
+                if (button.disabled || button.getAttribute('aria-disabled') === 'true') continue;
+                if (button.getClientRects().length === 0) continue;
+                return button;
+            }
+        }
+        return null;
+    };
+
+    var sendMessage = function (messageInput) {
+        var sendBtn = findSendButton(messageInput);
         if (sendBtn) {
-            log('[SEND] Found send button, clicking...');
-            sendBtn.dispatchEvent(new Event('click', { bubbles: true }));
+            log('[SEND] Clicking visible send control: ' + (sendBtn.getAttribute('data-e2e') || sendBtn.tagName));
+            sendBtn.click();
             return;
         }
 
-        log('[SEND] No send button found, pressing Enter...');
+        log('[SEND] No usable send control found; trying Enter');
+        messageInput.focus();
         messageInput.dispatchEvent(new KeyboardEvent('keydown', {
-            key: 'Enter',
-            code: 'Enter',
-            keyCode: 13,
-            which: 13,
-            bubbles: true,
-            cancelable: true
+            key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true
         }));
-
         messageInput.dispatchEvent(new KeyboardEvent('keyup', {
-            key: 'Enter',
-            code: 'Enter',
-            keyCode: 13,
-            which: 13,
-            bubbles: true
+            key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true
         }));
     };
 
-    // ── Result Reporting ─────────────────────────────────────────────────────
-
     var reportSuccess = function () {
-        log('[RESULT] SUCCESS — Message sent to ' + userName);
+        log('[RESULT] CONFIRMED IN CHAT — New message appeared for ' + userName);
         if (typeof StreakApp !== 'undefined') {
             StreakApp.onMessageSent(userName, true, '');
         }
@@ -471,21 +499,56 @@
         }
     };
 
+    var verifySend = function (messageInput, baseline) {
+        var checks = 0;
+        var maxChecks = 20;
+        var check = function () {
+            checks++;
+            var emptied = normalizeMessageText(messageInput.textContent) === '';
+            var shownInChat = countRenderedMessageMatches() > baseline;
+            if (emptied && shownInChat) {
+                reportSuccess();
+                return;
+            }
+            if (checks >= maxChecks) {
+                log('[VERIFY] No confirmed new message: editorEmpty=' + emptied + ', rendered=' + shownInChat);
+                reportError('Send not confirmed; check TikTok before retrying');
+                return;
+            }
+            setTimeout(check, 500);
+        };
+        setTimeout(check, 500);
+    };
+
     // ── Chat Processing ──────────────────────────────────────────────────────
 
     var sendMessageViaButton = function () {
         var messageInput = findMessageInput();
 
-        if (messageInput) {
-            log('[CHAT] Found message input, typing...');
-            typeMessage(messageInput, function () {
-                sendMessage(messageInput);
-                setTimeout(reportSuccess, 1000);
-            });
-        } else {
+        if (!messageInput) {
             log('[CHAT] Message input NOT found on page');
             reportError('Message input not found');
+            return;
         }
+
+        log('[CHAT] Found message input, typing...');
+        typeMessage(messageInput, function () {
+            var expected = normalizeMessageText(message);
+            var actual = normalizeMessageText(messageInput.textContent);
+            if (!expected || actual !== expected) {
+                log('[TYPE] Message content did not match expected text (expected length ' + expected.length + ', actual length ' + actual.length + ')');
+                reportError('Message was not correctly entered in the editor');
+                return;
+            }
+
+            var baseline = countRenderedMessageMatches();
+            try {
+                sendMessage(messageInput);
+                verifySend(messageInput, baseline);
+            } catch (e) {
+                reportError('Send control failed: ' + e.message);
+            }
+        });
     };
 
     var searchForUserInCurrentChat = function () {
