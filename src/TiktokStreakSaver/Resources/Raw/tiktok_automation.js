@@ -440,25 +440,43 @@
     };
 
     var findSendButton = function (messageInput) {
+        // Explicit text-send controls only: TikTok's dm-new-media-btn is NOT
+        // the send button. Never fall back to any [data-e2e*="send"] or a
+        // generic submit control, which may point to unrelated actions.
         var selectors = [
-            '[data-e2e="send-button"]',
+            '[data-e2e="dm-new-send-btn"]',
             '[data-e2e="message-send"]',
-            '[data-e2e="chat-send-button"]',
-            'button[type="submit"]',
-            'button[aria-label*="send" i]'
+            '[data-e2e="send-button"]',
+            '[data-e2e="chat-send-button"]'
         ];
-        for (var scope = messageInput.parentElement, depth = 0; scope && depth < 6; scope = scope.parentElement, depth++) {
+        var forbidden = /media|attachment|sticker|emoji|gif|gift|upload/i;
+        for (var scope = messageInput.parentElement, depth = 0; scope && depth < 7; scope = scope.parentElement, depth++) {
             for (var i = 0; i < selectors.length; i++) {
                 var candidates = scope.querySelectorAll(selectors[i]);
                 for (var j = 0; j < candidates.length; j++) {
                     var btn = candidates[j];
-                    if (btn.getClientRects().length === 0 || btn.disabled ||
-                        btn.getAttribute('aria-disabled') === 'true' || btn.closest('[contenteditable]')) continue;
-                    log('[SEND] Using selector ' + selectors[i]);
+                    var actionId = btn.getAttribute('data-e2e') || '';
+                    var label = btn.getAttribute('aria-label') || '';
+                    if (forbidden.test(actionId) || forbidden.test(label) ||
+                        btn.getClientRects().length === 0 || btn.disabled ||
+                        btn.getAttribute('aria-disabled') === 'true' ||
+                        btn.closest('[contenteditable]')) continue;
+                    log('[SEND] Verified text-send control: ' + actionId);
                     return btn;
                 }
             }
         }
+
+        // Diagnostics only. Avoid logging message contents or account cookies.
+        var nearby = messageInput.parentElement;
+        if (nearby && nearby.parentElement) nearby = nearby.parentElement;
+        var controls = nearby ? nearby.querySelectorAll('[data-e2e*="btn"], [data-e2e*="send"]') : [];
+        var names = [];
+        for (var k = 0; k < controls.length && names.length < 12; k++) {
+            var name = controls[k].getAttribute('data-e2e') || '';
+            if (name && names.indexOf(name) < 0) names.push(name);
+        }
+        log('[SEND] Text-send control not found; nearby data-e2e: ' + names.join(', '));
         return null;
     };
 
