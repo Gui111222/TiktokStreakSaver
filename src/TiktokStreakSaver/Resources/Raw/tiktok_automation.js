@@ -116,10 +116,26 @@
         }
     };
 
+    var logChatListState = function (phase) {
+        var list = document.querySelector('[data-e2e="dm-new-conversation-list"]');
+        var selectors = ["[data-e2e*='dm-new-conversation-item']", "[data-e2e*='chat-list-item']", "[data-e2e*='chat-item']"];
+        var counts = [];
+        for (var i = 0; i < selectors.length; i++) counts.push(selectors[i] + '=' + document.querySelectorAll(selectors[i]).length);
+        var listChildren = list ? list.children.length : -1;
+        var listTextLength = list ? (list.innerText || '').length : -1;
+        log('[CHAT-DIAG] ' + phase + ' ready=' + document.readyState +
+            ' domNodes=' + document.querySelectorAll('*').length +
+            ' listPresent=' + !!list + ' listChildren=' + listChildren +
+            ' listTextLength=' + listTextLength + ' bodyTextLength=' +
+            ((document.body && document.body.innerText) || '').length +
+            ' selectors: ' + counts.join('; '));
+    };
+
     var dumpFullDiagnostics = function () {
         dumpEnvironment();
         log('=== PAGE DIAGNOSTICS START ===');
         dumpDataE2eValues();
+        logChatListState('full-diagnostics');
         searchUsernameInDom();
 
         // Log visible body text length to detect empty/blocked pages
@@ -143,24 +159,33 @@
     // ── Chat Item Discovery ──────────────────────────────────────────────────
 
     var findChatItems = function () {
-        // Known selectors in priority order. Recipient is verified after opening a chat.
-        var selectors = [
-            '[data-e2e^="dm-new-conversation-item"]',
-            '[data-e2e*="chat-list-item"]',
-            '[data-e2e*="chat-item"]'
-        ];
-        for (var i = 0; i < selectors.length; i++) {
-            var items = document.querySelectorAll(selectors[i]);
-            if (items.length) {
-                log('[FIND] ' + items.length + ' chats via ' + selectors[i]);
-                return items;
-            }
+        // Primary: current TikTok DM selector
+        var items = document.querySelectorAll("[data-e2e*='dm-new-conversation-item']");
+        if (items.length > 0) {
+            log('[FIND] Found ' + items.length + ' items via: dm-new-conversation-item');
+            return items;
         }
-        log('[FIND] No known chat list selector matched');
+
+        // Fallback selectors — TikTok periodically renames data-e2e values
+        var fallbacks = [
+            "[data-e2e*='chat-list-item']",
+            "[data-e2e*='chat-item']"
+        ];
+        for (var i = 0; i < fallbacks.length; i++) {
+            try {
+                items = document.querySelectorAll(fallbacks[i]);
+                if (items.length > 0) {
+                    log('[FIND] Found ' + items.length + ' items via fallback: ' + fallbacks[i]);
+                    return items;
+                }
+            } catch (e) { }
+        }
+
+        log('[FIND] WARNING: No chat items found with any selector');
         return [];
     };
 
-        var findChatListContainer = function () {
+    var findChatListContainer = function () {
         if (chatItems.length > 0) {
             var parent = chatItems[0].parentElement;
             while (parent && parent !== document.body) {
@@ -201,6 +226,7 @@
         container.scrollTop += container.clientHeight * 3;
         log('[SCROLL] Scrolling chat list (attempt ' + scrollAttempts + '/' + maxScrollAttempts + ', scrolling by ' + (container.clientHeight * 3) + 'px)...');
         setTimeout(function () {
+            logChatListState('after-scroll');
             chatItems = findChatItems();
             log('[SCROLL] After scroll: ' + chatItems.length + ' items, scrollTop: ' + container.scrollTop + ' (was ' + prevScrollTop + ')');
 
@@ -722,6 +748,7 @@
             setTimeout(function () {
                 // ── Checkpoint: 3 seconds ──
                 log('[CHECKPOINT-3S] Checking for chat items (attempt 1)...');
+                logChatListState('checkpoint-3s');
                 chatItems = findChatItems();
                 log('[CHECKPOINT-3S] Found ' + chatItems.length + ' chat items');
 
@@ -739,6 +766,7 @@
                 setTimeout(function () {
                     // ── Checkpoint: 8 seconds total ──
                     log('[CHECKPOINT-8S] Checking for chat items (attempt 2 after 8s total)...');
+                    logChatListState('checkpoint-8s');
                     chatItems = findChatItems();
                     log('[CHECKPOINT-8S] Found ' + chatItems.length + ' chat items');
 
