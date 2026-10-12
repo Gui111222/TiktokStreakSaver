@@ -56,15 +56,50 @@ jobs:
       - name: Restore workloads
         run: dotnet workload restore ${{ env.PROJECT_PATH }}
 
-      - name: Build APK (Debug)
-        run: >
-          dotnet build ${{ env.PROJECT_PATH }}
-          -f net9.0-android
-          -c Debug
-          -p:SkipIosNativeBuild=true
-          -p:TargetFrameworks=net9.0-android
-          -p:EmbedAssembliesIntoApk=true
-          -p:AndroidPackageFormats=apk
+      # Configure once in Settings > Secrets and variables > Actions:
+      # STREAK_KEYSTORE_BASE64: base64 of a private Android .jks keystore
+      # STREAK_KEYSTORE_PASSWORD: keystore/key password (same for both)
+      # STREAK_KEY_ALIAS: alias in that keystore
+      # Keep the original .jks backed up privately; losing it prevents updates.
+      - name: Restore persistent signing key
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.STREAK_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.STREAK_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.STREAK_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$KEYSTORE_B64" || -z "$KEYSTORE_PASSWORD" || -z "$KEY_ALIAS" ]]; then
+            echo "::error::Configure STREAK_KEYSTORE_BASE64, STREAK_KEYSTORE_PASSWORD and STREAK_KEY_ALIAS in GitHub Actions Secrets before building."
+            exit 1
+          fi
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/streaksaver.jks"
+          chmod 600 "$RUNNER_TEMP/streaksaver.jks"
+          keytool -list -keystore "$RUNNER_TEMP/streaksaver.jks" -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" >/dev/null
+          echo "ANDROID_KEYSTORE=$RUNNER_TEMP/streaksaver.jks" >> "$GITHUB_ENV"
+          echo "ANDROID_KEY_ALIAS=$KEY_ALIAS" >> "$GITHUB_ENV"
+          echo "ANDROID_SIGNING_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+
+      - name: Build APK (Debug, persistent signature)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # GitHub run numbers increase across new workflow runs. A fixed
+          # positive offset keeps the versionCode ahead of old version 5.
+          version_code=$((1000 + GITHUB_RUN_NUMBER))
+          dotnet build "${{ env.PROJECT_PATH }}" \
+            -f net9.0-android \
+            -c Debug \
+            -p:SkipIosNativeBuild=true \
+            -p:TargetFrameworks=net9.0-android \
+            -p:EmbedAssembliesIntoApk=true \
+            -p:AndroidPackageFormats=apk \
+            -p:ApplicationVersion="$version_code" \
+            -p:AndroidKeyStore=true \
+            -p:AndroidSigningKeyStore="$ANDROID_KEYSTORE" \
+            -p:AndroidSigningKeyAlias="$ANDROID_KEY_ALIAS" \
+            -p:AndroidSigningKeyPass="env:ANDROID_SIGNING_PASSWORD" \
+            -p:AndroidSigningStorePass="env:ANDROID_SIGNING_PASSWORD"
 
       - name: Select signed APK
         shell: bash
