@@ -744,46 +744,37 @@
                 return;
             }
 
-            log('[INIT] Waiting 3s for page stabilization...');
-            setTimeout(function () {
-                // ── Checkpoint: 3 seconds ──
-                log('[CHECKPOINT-3S] Checking for chat items (attempt 1)...');
-                logChatListState('checkpoint-3s');
+            // Wait for actual conversation items, not just document.readyState=complete.
+            // A TikTok SPA can render the shell and conversation container much earlier
+            // than its asynchronous conversation data.
+            var startedAt = Date.now();
+            var maxWaitMs = 60000;
+            var pollMs = 3000;
+            var pollCount = 0;
+            var waitForChats = function () {
+                if (resultReported || found) return;
+                pollCount++;
+                var elapsed = Date.now() - startedAt;
+                log('[LOAD-WAIT] Poll ' + pollCount + ', elapsed=' + elapsed + 'ms');
+                logChatListState('load-wait-' + pollCount);
                 chatItems = findChatItems();
-                log('[CHECKPOINT-3S] Found ' + chatItems.length + ' chat items');
-
                 if (chatItems.length > 0) {
-                    log('[CHECKPOINT-3S] Items found, starting chat scan');
+                    log('[LOAD-WAIT] Ready: ' + chatItems.length + ' chat items after ' + elapsed + 'ms');
                     checkNextChat();
                     return;
                 }
-
-                // Zero items — run diagnostics and retry
-                log('[CHECKPOINT-3S] Zero items found, running full diagnostics...');
-                dumpFullDiagnostics();
-                log('[CHECKPOINT-3S] Scheduling retry in 5 more seconds...');
-
-                setTimeout(function () {
-                    // ── Checkpoint: 8 seconds total ──
-                    log('[CHECKPOINT-8S] Checking for chat items (attempt 2 after 8s total)...');
-                    logChatListState('checkpoint-8s');
-                    chatItems = findChatItems();
-                    log('[CHECKPOINT-8S] Found ' + chatItems.length + ' chat items');
-
-                    if (chatItems.length > 0) {
-                        log('[CHECKPOINT-8S] Items found on retry, starting chat scan');
-                        checkNextChat();
-                        return;
-                    }
-
-                    log('[CHECKPOINT-8S] Still zero items after 8s, running full diagnostics again...');
+                if (pollCount === 1 || pollCount % 5 === 0) {
                     dumpFullDiagnostics();
-                    log('[CHECKPOINT-8S] Giving up - reporting error');
-                    reportError('No chat items found after 8s wait');
-
-                }, 5000);
-
-            }, 3000);
+                }
+                if (elapsed >= maxWaitMs) {
+                    log('[LOAD-WAIT] Timed out: no rendered conversation items after ' + elapsed + 'ms');
+                    reportError('Conversation list did not load within 60 seconds');
+                    return;
+                }
+                setTimeout(waitForChats, pollMs);
+            };
+            log('[INIT] Waiting up to 60s for rendered chat items (3s polling)...');
+            setTimeout(waitForChats, pollMs);
 
         } catch (e) {
             log('[INIT] EXCEPTION: ' + e.message);
