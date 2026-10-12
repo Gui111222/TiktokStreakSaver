@@ -512,7 +512,21 @@
             reportError('Send button not found; TikTok layout may have changed');
             return false;
         }
-        btn.click();
+        // Some TikTok controls are SVG nodes: they have dispatchEvent but no
+        // HTMLElement.click() method. Dispatch a bubbling click on the verified
+        // text-send control; never fall back to media/attachment controls.
+        log('[SEND] Control tag=' + btn.tagName + ', nativeClick=' + (typeof btn.click));
+        if (typeof btn.click === 'function') {
+            btn.click();
+        } else {
+            var event = new MouseEvent('click', {
+                bubbles: true,
+                cancelable: true,
+                view: window
+            });
+            var accepted = btn.dispatchEvent(event);
+            log('[SEND] Dispatched bubbling click on text-send control; defaultNotCanceled=' + accepted);
+        }
         return true;
     };
 
